@@ -1,0 +1,31 @@
+# Maven / Java build outputs
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project-specific generated I/O files
+input.txt
+output.txt
+PRESENTATION.md
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
