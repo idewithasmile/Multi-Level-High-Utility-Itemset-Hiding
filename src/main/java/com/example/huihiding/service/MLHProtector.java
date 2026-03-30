@@ -5,9 +5,11 @@ import com.example.huihiding.model.Itemset;
 import com.example.huihiding.model.Transaction;
 import com.example.huihiding.model.Taxonomy;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -31,24 +33,78 @@ public class MLHProtector {
         HierarchicalDatabase working = original.deepCopy();
         Taxonomy taxonomy = working.getTaxonomy();
         Map<String, Double> eu = working.getExternalUtilities();
+
         for (Itemset sensitive : sensitiveItemsets) {
-            Map<String, Set<String>> groups = buildGroups(sensitive.getItems(), taxonomy);
-            Set<String> leaves = groups.values().stream().flatMap(Set::stream).collect(Collectors.toSet());
-            Set<Transaction> supports = findSupportingTransactions(working, groups);
-            double utility = computeSensitiveUtility(working, groups, supports);
-            double diffg = utility - working.getMinUtilityThreshold();
-            if (diffg <= 0) {
+            Map<String, Set<String>> descendantsBySensitiveItem = new LinkedHashMap<>();
+            for (String sg : sensitive.getItems()) {
+                descendantsBySensitiveItem.put(sg, getDescendants(sg, taxonomy));
+            }
+
+            List<Set<String>> leafCombinations = buildLeafCombinations(descendantsBySensitiveItem);
+            if (leafCombinations.isEmpty()) {
                 continue;
             }
 
-            // MLH: phan bo diff_g cho tung leaf theo ty le utility
-            for (String item : leaves) {
-                double sumUi = supports.stream().mapToDouble(t -> t.getUtility(item, eu)).sum();
-                if (sumUi <= 0.0d) {
-                    continue;
+            Set<String> descendantUnion = leafCombinations.stream()
+                    .flatMap(Set::stream)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (descendantUnion.isEmpty()) {
+                continue;
+            }
+
+            // Algorithm 1: repeatedly choose highest-utility leaf in supporting transactions.
+            while (true) {
+                Set<Transaction> supports = findSupportingTransactionsByCombinations(working, leafCombinations);
+                if (supports.isEmpty()) {
+                    break;
                 }
-                double diffi = (sumUi / utility) * diffg;
-                applySingleItemReductionsMlh(working, eu, item, diffi, supports);
+
+                double utility = computeSensitiveUtilityByDescendants(supports, descendantUnion, eu);
+                double strictThreshold = working.getMinUtilityThreshold() - 1e-9;
+                double remainingNeed = utility - strictThreshold;
+                if (remainingNeed <= 1e-9) {
+                    break;
+                }
+
+                // MLH theo paper:
+                // 1) Chon item la co tong utility lon nhat tren cac giao dich ho tro.
+                // 2) Chon giao dich ho tro co utility lon nhat cho item do.
+                String bestItem = selectHighestUtilityItem(working, eu, descendantUnion, supports);
+                if (bestItem == null) {
+                    break;
+                }
+
+                Transaction bestTx = selectTransactionWithHighestUtility(working, eu, bestItem, supports);
+                if (bestTx == null) {
+                    break;
+                }
+
+                double bestUtility = bestTx.getUtility(bestItem, eu);
+
+                if (bestTx == null || bestItem == null || bestUtility <= 0.0d) {
+                    break;
+                }
+
+                double ptable = eu.getOrDefault(bestItem, 0.0d);
+                if (ptable <= 0.0d) {
+                    break;
+                }
+
+                int currentQty = bestTx.getInternalUtility(bestItem);
+                if (currentQty <= 0) {
+                    break;
+                }
+
+                double maxReducibleUtility = currentQty * ptable; // MLH can delete -> floor 0
+                double requiredUtility = Math.min(remainingNeed, maxReducibleUtility);
+                int rq = (int) Math.ceil(requiredUtility / ptable);
+                rq = Math.min(rq, currentQty);
+                if (rq <= 0) {
+                    break;
+                }
+
+                int newQty = Math.max(0, currentQty - rq);
+                bestTx.setInternalUtility(bestItem, newQty);
             }
         }
         return working;
@@ -114,9 +170,11 @@ public class MLHProtector {
                                               Set<String> leaves,
                                               Set<Transaction> supports) {
         return leaves.stream()
-                .max(Comparator.comparingDouble(item -> supports.stream()
-                        .mapToDouble(t -> t.getUtility(item, eu))
-                        .sum()))
+            .max(Comparator
+                .comparingDouble((String item) -> supports.stream()
+                    .mapToDouble(t -> t.getUtility(item, eu))
+                    .sum())
+                .thenComparing(Comparator.naturalOrder()))
                 .orElse(null);
     }
 
@@ -150,6 +208,81 @@ public class MLHProtector {
             groups.put(item, taxonomy.getDescendantLeaves(item));
         }
         return groups;
+    }
+
+    protected Set<String> getDescendants(String sensitiveItem, Taxonomy taxonomy) {
+        if (taxonomy == null) {
+            return Set.of(sensitiveItem);
+        }
+        Set<String> descendants = taxonomy.getDescendantLeaves(sensitiveItem);
+        if (descendants == null || descendants.isEmpty()) {
+            return Set.of(sensitiveItem);
+        }
+        return descendants.stream()
+                .sorted()
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    protected List<Set<String>> buildLeafCombinations(Map<String, Set<String>> descendantsBySensitiveItem) {
+        List<List<String>> groups = descendantsBySensitiveItem.values().stream()
+                .map(group -> group.stream().sorted().toList())
+                .toList();
+
+        if (groups.stream().anyMatch(List::isEmpty)) {
+            return List.of();
+        }
+
+        List<Set<String>> out = new ArrayList<>();
+        buildLeafCombinationsDfs(groups, 0, new LinkedHashSet<>(), out);
+        return out;
+    }
+
+    private void buildLeafCombinationsDfs(List<List<String>> groups,
+                                          int index,
+                                          LinkedHashSet<String> current,
+                                          List<Set<String>> out) {
+        if (index >= groups.size()) {
+            if (!current.isEmpty()) {
+                out.add(new LinkedHashSet<>(current));
+            }
+            return;
+        }
+
+        for (String leaf : groups.get(index)) {
+            boolean added = current.add(leaf);
+            buildLeafCombinationsDfs(groups, index + 1, current, out);
+            if (added) {
+                current.remove(leaf);
+            }
+        }
+    }
+
+    protected Set<Transaction> findSupportingTransactionsByCombinations(HierarchicalDatabase db,
+                                                                        List<Set<String>> leafCombinations) {
+        return db.getTransactions().stream()
+                .filter(tx -> supportsAnyCombination(tx, leafCombinations))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private boolean supportsAnyCombination(Transaction tx, List<Set<String>> leafCombinations) {
+        for (Set<String> combo : leafCombinations) {
+            boolean containsAll = combo.stream().allMatch(item -> tx.getInternalUtility(item) > 0);
+            if (containsAll) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected double computeSensitiveUtilityByDescendants(Set<Transaction> supports,
+                                                          Set<String> descendants,
+                                                          Map<String, Double> eu) {
+        return supports.stream()
+                .mapToDouble(tx -> descendants.stream()
+                        .filter(item -> tx.getInternalUtility(item) > 0)
+                        .mapToDouble(item -> tx.getUtility(item, eu))
+                        .sum())
+                .sum();
     }
 
         protected Set<Transaction> findSupportingTransactions(HierarchicalDatabase db, Map<String, Set<String>> groups) {

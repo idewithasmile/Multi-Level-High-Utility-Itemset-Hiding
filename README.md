@@ -1,92 +1,188 @@
 # Multi-level High Utility Itemset Hiding (MLHProtector / FMLHProtector)
 
-Java Maven implementation that follows the paper in *Multi-level high utility itemset hiding* (attached PDF). The project loads a hierarchical transactional database, applies MLHProtector and FMLHProtector to hide sensitive high-utility itemsets, and reports standard PPUM metrics.
+Java Maven project for PPUM on hierarchical transaction databases.
 
-## Architecture
-- **Model**: taxonomy, transactions, itemsets, in-memory hierarchical DB.
-- **DAO (JDBC + H2)**: taxonomy, external utilities, transactions, sensitive itemsets.
-- **Services**: schema seeding, database loading, algorithms (MLH/FMLH), metric calculator.
-- **Controller**: orchestrates runs and metric evaluation.
-- **CLI**: `App` runs both algorithms on sample data.
+Project now supports:
+- Running `MLHProtector` and `FMLHProtector`
+- Closed-loop scientific evaluation with SPMF (`MLHUIMiner`)
+- Automatic export to SPMF format with stable String→Integer mapping
+- PPUM metrics report: HF, MC, AC (plus existing internal metrics)
 
-## Getting started
-1. Build and test:
-   ```bash
-   mvn clean test
-   ```
-2. Run the sample CLI:
-   ```bash
-   mvn clean package
-   java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.App
-   ```
-   Output prints HF/MC/AC/DSS/DUS/IUS for both algorithms using the sample dataset in `src/main/resources/schema.sql` (threshold ξ = 88).
+---
 
-3. Run interactive menu:
-   ```bash
-   java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.App --menu
-   ```
-   - Option 1: run embedded demo from `schema.sql`
-   - Option 2: run by file input `input.txt` and export report to `output.txt`
+## 1) Kiến trúc chính
 
-4. Run directly with file mode:
-   ```bash
-   java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.App --file input.txt output.txt
-   ```
-   Report file includes:
-   - Metrics for MLH/FMLH
-   - Sanitized transactions
-   - PASS/FAIL comparison against expected outputs (if sections `EXPECTED_MLH`, `EXPECTED_FMLH` are present in input file)
+- **Core models**: `HierarchicalDatabase`, `Transaction`, `Itemset`, `Taxonomy`
+- **Sanitization**:
+  - `MLHProtector`
+  - `FMLHProtector`
+- **SPMF integration**:
+  - `SPMFDataExporter` (xuất DB/Taxonomy sang chuẩn SPMF, giữ ID mapping ổn định)
+  - `EndToEndEvaluatorService` (pipeline đóng vòng trước/sau sanitize)
+  - `SPMFValidatorService` (tiện ích xác thực/parse riêng)
+- **Entry points**:
+  - CLI: `App`
+  - GUI: `DesktopApp`
 
-5. Run Desktop GUI (Java Swing):
-   ```bash
-   java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.ui.DesktopApp
-   ```
-   GUI gồm:
-   - Menu `File -> Import Dataset` để nạp `input.txt`
-   - Bảng hiển thị Database gốc, Taxonomy, External Utility, Sensitive Itemsets
-   - Nút chạy `MLHProtector` / `FMLHProtector`
-   - Khu vực console hiển thị metrics và thời gian chạy
+---
 
-## Customizing
-- Edit `src/main/resources/schema.sql` to change taxonomy, utilities, transactions, and sensitive itemsets.
-- Edit `input.txt` to run paper-style fixed dataset and expected-output validation via file mode.
-- Adjust `MIN_THRESHOLD` in `com.example.huihiding.App` to change the minimum utility threshold.
-- `HierarchicalDatabase.discoverHighUtilityItemsets` is a naive enumerator (suitable for small demos); replace with a proper HUIM miner for larger datasets.
+## 2) Build nhanh
 
-## Notes
-- The sanitization algorithms reduce item internal utilities instead of deleting transactions, keeping sanitized data usable.
-- Metrics follow the paper: HF, MC, AC, DSS, DUS, IUS.
-
-## Tổng hợp cách chạy chương trình
-
-1) Build và test toàn bộ:
 ```bash
 mvn clean test
+mvn clean package
 ```
 
-2) Chạy bản CLI mặc định (dữ liệu từ schema.sql):
+Nếu đang có test fail (ví dụ testcase ground-truth đang bật), lệnh `mvn clean package` sẽ dừng trước khi tạo JAR. Khi đó dùng:
+
 ```bash
-mvn clean package
+mvn clean package -DskipTests
+```
+
+---
+
+## 3) Chạy chương trình chính
+
+### 3.1 Chạy demo mặc định (schema.sql)
+
+```bash
 java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.App
 ```
 
-3) Chạy CLI có menu tương tác:
+Gợi ý ổn định hơn (tự lo classpath dependency):
+
+```bash
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass=com.example.huihiding.App
+```
+
+### 3.2 Chạy chế độ menu
+
 ```bash
 java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.App --menu
 ```
 
-4) Chạy bằng file input và xuất kết quả ra output:
+Hoặc:
+
+```bash
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass=com.example.huihiding.App -Dexec.args="--menu"
+```
+
+### 3.3 Chạy bằng file input/output
+
 ```bash
 java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.App --file input.txt output.txt
 cat output.txt
 ```
 
-5) Chạy giao diện Desktop Swing:
+Hoặc:
+
+```bash
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass=com.example.huihiding.App -Dexec.args="--file input.txt output.txt"
+cat output.txt
+```
+
+### 3.4 Chạy GUI Swing
+
 ```bash
 java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.ui.DesktopApp
 ```
 
-6) Nếu chưa có file jar hoặc jar chưa mới, package lại rồi chạy:
+Hoặc:
+
 ```bash
-mvn clean package
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass=com.example.huihiding.ui.DesktopApp
 ```
+
+### 3.5 Chạy UI so sánh Before/After mới (MainFrame)
+
+```bash
+java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.ui.MainFrame
+```
+
+Hoặc:
+
+```bash
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass=com.example.huihiding.ui.MainFrame
+```
+
+---
+
+## 4) Closed-loop Evaluation với SPMF (mới)
+
+## Mục tiêu
+
+Thực hiện đúng luồng đánh giá khoa học:
+1. Mine HUI trên DB gốc (SPMF)
+2. Chạy `FMLHProtector` trong bộ nhớ
+3. Mine HUI trên DB đã sanitize (SPMF)
+4. So sánh tập itemset để tính HF/MC/AC
+
+## Thành phần sử dụng
+
+- `EndToEndEvaluatorService`: điều phối toàn bộ pipeline
+- `SPMFDataExporter`: xuất dữ liệu SPMF với ánh xạ ID nhất quán giữa bản gốc và bản sanitize
+
+## Chuẩn bị
+
+1. Có file `spmf.jar` (bạn tự tải từ SPMF project).
+2. Có file input nội bộ (ví dụ `input.txt`) theo format của project (`[PARAMETERS]`, `[EXTERNAL_UTILITIES]`, `[TAXONOMY]`, `[TRANSACTIONS]`, `[SENSITIVE_ITEMSETS]`).
+
+## Chạy pipeline
+
+```bash
+java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.service.EndToEndEvaluatorService <path/to/spmf.jar> <path/to/input.txt> [workDir]
+```
+
+Nếu build đang fail test, chạy trực tiếp bằng Maven exec:
+
+```bash
+mvn -DskipTests org.codehaus.mojo:exec-maven-plugin:3.3.0:java -Dexec.mainClass=com.example.huihiding.service.EndToEndEvaluatorService -Dexec.args="<path/to/spmf.jar> <path/to/input.txt> [workDir]"
+```
+
+Ví dụ:
+
+```bash
+java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.service.EndToEndEvaluatorService ./spmf.jar ./input.txt ./target/e2e-eval
+```
+
+## Các file sinh ra trong `workDir`
+
+- `spmf_original_db.txt`
+- `spmf_taxonomy.txt`
+- `spmf_original_output.txt`
+- `spmf_sanitized_db.txt`
+- `spmf_sanitized_output.txt`
+
+## Output report
+
+Console sẽ in:
+- Số lượng `Original HUIs`, `Sanitized HUIs`, `Sensitive HUIs`
+- `HF (Hiding Failure)`
+- `MC (Missing Cost)`
+- `AC (Artificial Cost)`
+- Tỷ lệ phần trăm cho từng chỉ số
+
+---
+
+## 5) Lưu ý kỹ thuật quan trọng
+
+1. **Không hard-code expected transactions** khi đánh giá học thuật.
+   Dùng closed-loop mining trước/sau sanitize là đúng phương pháp.
+
+2. **ID mapping phải ổn định** giữa DB gốc và DB sanitize.
+   Vì vậy pipeline dùng **cùng một instance** `SPMFDataExporter`.
+
+3. **SPMF format yêu cầu số nguyên dương**.
+   Exporter đã xử lý theo định dạng:
+   `item1 item2:TU:u1 u2`
+
+4. `EndToEndEvaluatorService` hiện parse input nội bộ bằng parser thật của hệ thống (App parser), để đảm bảo cùng lifecycle dữ liệu.
+
+---
+
+## 6) Các file chính đã cập nhật gần đây
+
+- [src/main/java/com/example/huihiding/service/EndToEndEvaluatorService.java](src/main/java/com/example/huihiding/service/EndToEndEvaluatorService.java)
+- [src/main/java/com/example/huihiding/service/SPMFDataExporter.java](src/main/java/com/example/huihiding/service/SPMFDataExporter.java)
+- [src/main/java/com/example/huihiding/service/SPMFValidatorService.java](src/main/java/com/example/huihiding/service/SPMFValidatorService.java)
+- [src/test/java/com/example/huihiding/ProtectorAlgorithmsTest.java](src/test/java/com/example/huihiding/ProtectorAlgorithmsTest.java)

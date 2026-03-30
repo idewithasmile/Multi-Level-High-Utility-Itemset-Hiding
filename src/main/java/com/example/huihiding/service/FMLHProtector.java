@@ -6,7 +6,9 @@ import com.example.huihiding.model.Transaction;
 import com.example.huihiding.model.Taxonomy;
 
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +19,8 @@ import java.util.stream.Collectors;
  * Phien ban nhanh: sap xep tap nhay cam theo do lon, tranh giam lap lai tren cung item.
  */
 public class FMLHProtector extends MLHProtector {
+    private static final long LOOP_TIMEOUT_MS = 2_000L;
+
     public FMLHProtector(HierarchicalDatabase original, List<Itemset> sensitiveItemsets) {
         super(original, sensitiveItemsets.stream()
                 .sorted(Comparator.comparingInt(a -> -a.getItems().size()))
@@ -28,43 +32,100 @@ public class FMLHProtector extends MLHProtector {
         HierarchicalDatabase working = super.original.deepCopy();
         Taxonomy taxonomy = working.getTaxonomy();
         Map<String, Double> eu = working.getExternalUtilities();
+
         for (Itemset sensitive : super.sensitiveItemsets) {
-            Map<String, Set<String>> groups = buildGroups(sensitive.getItems(), taxonomy);
-            Set<Transaction> supports = findSupportingTransactions(working, groups);
-
+            final long deadlineNanos = System.nanoTime() + LOOP_TIMEOUT_MS * 1_000_000L;
             List<String> orderedGeneralized = orderedGeneralizedItems(sensitive);
-            List<String> orderedLeaves = sortLeavesByUtilityDesc(
-                    expandLeavesInOrder(orderedGeneralized, taxonomy),
-                    supports,
-                    eu
-            );
-            Set<String> leaves = new LinkedHashSet<>(orderedLeaves);
-            if (leaves.isEmpty()) {
+            Map<String, Set<String>> descendantsBySensitiveItem = new LinkedHashMap<>();
+            for (String generalized : orderedGeneralized) {
+                descendantsBySensitiveItem.put(generalized, resolveLeafFallback(generalized, taxonomy));
+            }
+
+            List<Set<String>> leafCombinations = buildLeafCombinations(descendantsBySensitiveItem);
+            if (leafCombinations.isEmpty()) {
                 continue;
             }
 
-            double utility = computeSensitiveUtility(working, groups, supports);
-            double diffCounter = utility - working.getMinUtilityThreshold();
-            if (diffCounter <= 0) {
+            Set<String> descendantUnion = leafCombinations.stream()
+                    .flatMap(Set::stream)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+
+            if (descendantUnion.isEmpty()) {
                 continue;
             }
 
-            // FMLH: diffL giu co dinh theo itemset hien tai
-            double diffL = diffCounter;
-
-            // Theo y nghia dong "if diff_counter < 0 then CONTINUE" trong paper:
-            // khi da du nguong thi thoat khoi vong item hien tai va sang SML-HUI tiep theo.
-            itemLoop:
-            for (String item : leaves) {
-                double sumUi = supports.stream().mapToDouble(t -> t.getUtility(item, eu)).sum();
-                if (sumUi <= 0.0d) {
-                    continue;
+            // Loop until utility(S) < xi (or no more feasible reduction because anti-deletion floor reached).
+            while (true) {
+                if (System.nanoTime() > deadlineNanos) {
+                    String label = sensitive.getLabel() != null && !sensitive.getLabel().isBlank()
+                            ? sensitive.getLabel()
+                            : String.join(" ", sensitive.getItems());
+                    System.err.println("[FMLH TIMEOUT] Stop processing sensitive itemset '" + label
+                            + "' after " + LOOP_TIMEOUT_MS + " ms watchdog.");
+                    break;
                 }
 
-                double diffi = (sumUi / utility) * diffL;
-                diffCounter = applySingleItemReductionsFmlh(working, eu, item, diffi, sumUi, supports, diffCounter);
-                if (diffCounter < 0.0d) {
-                    break itemLoop;
+                Set<Transaction> supports = findSupportingTransactionsByCombinations(working, leafCombinations);
+                if (supports.isEmpty()) {
+                    break;
+                }
+
+                double utility = computeSensitiveUtilityByDescendants(supports, descendantUnion, eu);
+                double strictThreshold = working.getMinUtilityThreshold() - 1e-9;
+                double remainingNeed = utility - strictThreshold;
+                if (remainingNeed <= 1e-9) {
+                    break;
+                }
+
+                List<String> orderedLeaves = sortLeavesByUtilityDesc(new ArrayList<>(descendantUnion), supports, eu);
+                boolean progressed = false;
+
+                for (String item : orderedLeaves) {
+                    double before = remainingNeed;
+                    remainingNeed = reduceLeafUtilityGreedy(
+                            eu,
+                            item,
+                            supports,
+                            remainingNeed
+                    );
+
+                    if (remainingNeed < before - 1e-9) {
+                        progressed = true;
+                    }
+                    if (remainingNeed <= 1e-9) {
+                        break;
+                    }
+                }
+
+                if (!progressed) {
+                    // Fallback (paper-consistent anti-deletion):
+                    // if normal utility-proportional reduction cannot progress,
+                    // try reducing sensitive items directly down to floor iu=1.
+                    boolean forcedProgress = forceDirectReductionToFloorOne(
+                            working,
+                            leafCombinations,
+                            descendantUnion,
+                            eu,
+                            utility,
+                            strictThreshold,
+                            deadlineNanos
+                    );
+                    if (!forcedProgress) {
+                        break;
+                    }
+                }
+            }
+
+            Set<Transaction> finalSupports = findSupportingTransactionsByCombinations(working, leafCombinations);
+            if (!finalSupports.isEmpty()) {
+                double finalUtility = computeSensitiveUtilityByDescendants(finalSupports, descendantUnion, eu);
+                if (finalUtility >= working.getMinUtilityThreshold() - 1e-9) {
+                    String label = sensitive.getLabel() != null && !sensitive.getLabel().isBlank()
+                            ? sensitive.getLabel()
+                            : String.join(" ", sensitive.getItems());
+                    System.err.println("[FMLH WARNING] Sensitive itemset '" + label +
+                            "' cannot be hidden below threshold due to anti-deletion floor (iu>=1). " +
+                            "Consider increasing threshold or using MLHProtector.");
                 }
             }
         }
@@ -84,35 +145,29 @@ public class FMLHProtector extends MLHProtector {
                                    Set<Transaction> supports) {
         double diffCounter = diff;
         for (String item : leaves) {
-            double sumUi = supports.stream().mapToDouble(t -> t.getUtility(item, eu)).sum();
-            if (sumUi <= 0.0d || diffCounter <= 0.0d) {
+            if (diffCounter <= 0.0d) {
                 continue;
             }
-            double diffi = (sumUi / Math.max(1e-9, sumUi)) * diffCounter;
-            diffCounter = applySingleItemReductionsFmlh(db, eu, item, diffi, sumUi, supports, diffCounter);
+            diffCounter = reduceLeafUtilityGreedy(eu, item, supports, diffCounter);
         }
     }
 
-    private double applySingleItemReductionsFmlh(HierarchicalDatabase db,
-                                                 Map<String, Double> eu,
-                                                 String item,
-                                                 double diffi,
-                                                 double sumUi,
-                                                 Set<Transaction> supports,
-                                                 double diffCounter) {
+    private double reduceLeafUtilityGreedy(Map<String, Double> eu,
+                                           String item,
+                                           Set<Transaction> supports,
+                                           double diffCounter) {
         double ptable = eu.getOrDefault(item, 0.0d);
         if (ptable <= 0.0d) {
             return diffCounter;
         }
 
-        for (Transaction tx : supports) {
-            if (diffCounter < 0.0d) {
-                break;
-            }
+        List<Transaction> orderedSupports = supports.stream()
+                .sorted(Comparator.comparingDouble((Transaction t) -> t.getUtility(item, eu)).reversed())
+                .toList();
 
-            int currentQty = tx.getInternalUtility(item);
-            if (currentQty <= 0) {
-                continue;
+        for (Transaction tx : orderedSupports) {
+            if (diffCounter <= 1e-9) {
+                break;
             }
 
             double uItemTp = tx.getUtility(item, eu);
@@ -120,11 +175,22 @@ public class FMLHProtector extends MLHProtector {
                 continue;
             }
 
-            // Cong thuc paper (FMLH): rq = ceil((diff_i/ptable_i) * (u(i,Tp)/sum(u(i))))
-            double ratio = uItemTp / sumUi;
-            int rq = (int) Math.ceil((diffi / ptable) * ratio);
+            int currentQty = tx.getInternalUtility(item);
+            if (currentQty <= 0) {
+                continue;
+            }
+
+            int maxReducibleQty = currentQty - 1; // anti-deletion floor
+            if (maxReducibleQty <= 0) {
+                continue;
+            }
+
+            double maxReducibleUtility = maxReducibleQty * ptable;
+            double requiredUtility = Math.min(diffCounter, maxReducibleUtility);
+            int rq = (int) Math.ceil(requiredUtility / ptable);
+            rq = Math.min(rq, maxReducibleQty);
             if (rq <= 0) {
-                rq = 1;
+                continue;
             }
 
             // FMLH khong xoa item: so luong toi thieu la 1
@@ -135,6 +201,7 @@ public class FMLHProtector extends MLHProtector {
             }
 
             tx.setInternalUtility(item, newQty);
+            tx.deductTransactionUtility(decreased, eu);
             diffCounter = diffCounter - decreased;
         }
 
@@ -143,24 +210,32 @@ public class FMLHProtector extends MLHProtector {
 
     private List<String> orderedGeneralizedItems(Itemset sensitive) {
         if (sensitive.getLabel() != null && !sensitive.getLabel().isBlank()) {
-            List<String> ordered = sensitive.getLabel().chars()
+            String label = sensitive.getLabel().trim();
+            int expectedSize = sensitive.getItems().size();
+
+            // Preferred: tokenized generalized form (e.g., "X Y", "X,Y", "10 11")
+            List<String> byTokens = java.util.Arrays.stream(label.split("[,\\s]+"))
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .filter(sensitive.getItems()::contains)
+                .distinct()
+                    .toList();
+            if (byTokens.size() == expectedSize) {
+                return byTokens;
+            }
+
+            // Backward compatibility: compact form like "XY"
+            List<String> byChars = label.chars()
                     .mapToObj(c -> String.valueOf((char) c))
                     .filter(sensitive.getItems()::contains)
+                .distinct()
                     .toList();
-            if (!ordered.isEmpty()) {
-                return ordered;
+            if (byChars.size() == expectedSize) {
+                return byChars;
             }
         }
-        return sensitive.getItems().stream().sorted().toList();
-    }
 
-    private List<String> expandLeavesInOrder(List<String> generalizedItems, Taxonomy taxonomy) {
-        LinkedHashSet<String> ordered = new LinkedHashSet<>();
-        for (String g : generalizedItems) {
-            Set<String> desc = taxonomy.getDescendantLeaves(g);
-            desc.stream().sorted().forEach(ordered::add);
-        }
-        return ordered.stream().toList();
+        return sensitive.getItems().stream().sorted().toList();
     }
 
     private List<String> sortLeavesByUtilityDesc(List<String> leaves,
@@ -179,4 +254,95 @@ public class FMLHProtector extends MLHProtector {
                         .thenComparing(Comparator.naturalOrder()))
                 .toList();
     }
+
+    private Set<String> resolveLeafFallback(String sensitiveItem, Taxonomy taxonomy) {
+        Set<String> descendants = getDescendants(sensitiveItem, taxonomy);
+        if (descendants == null || descendants.isEmpty()) {
+            return Set.of(sensitiveItem);
+        }
+        return descendants;
+    }
+
+            private boolean forceDirectReductionToFloorOne(HierarchicalDatabase db,
+                                                           List<Set<String>> leafCombinations,
+                                                           Set<String> descendants,
+                                                           Map<String, Double> eu,
+                                                           double currentUtility,
+                                                           double strictThreshold,
+                                                           long deadlineNanos) {
+                boolean changed = false;
+                double utility = currentUtility;
+
+                while (utility > strictThreshold + 1e-9) {
+                    if (System.nanoTime() > deadlineNanos) {
+                        return changed;
+                    }
+
+                    Set<Transaction> currentSupports = findSupportingTransactionsByCombinations(db, leafCombinations);
+                    if (currentSupports.isEmpty()) {
+                        break;
+                    }
+                    final Set<Transaction> supportsSnapshot = currentSupports;
+
+                    final double remainingNeed = utility - strictThreshold;
+
+                    String bestItem = descendants.stream()
+                            .max(Comparator
+                            .comparingDouble((String item) -> supportsSnapshot.stream()
+                                            .mapToDouble(t -> t.getUtility(item, eu))
+                                            .sum())
+                                    .thenComparing(Comparator.naturalOrder()))
+                            .orElse(null);
+
+                    if (bestItem == null) {
+                        break;
+                    }
+
+                        Transaction bestTx = supportsSnapshot.stream()
+                            .filter(t -> t.getInternalUtility(bestItem) > 1)
+                            .max(Comparator.comparingDouble(t -> t.getUtility(bestItem, eu)))
+                            .orElse(null);
+
+                    if (bestTx == null) {
+                        break;
+                    }
+
+                    // Anti-deletion floor is preserved: never go below 1 in FMLH.
+                    // Reduce by exactly what is needed (or maximum possible at this tx/item).
+                    int currentQty = bestTx.getInternalUtility(bestItem);
+                    double ptable = eu.getOrDefault(bestItem, 0.0d);
+                    if (ptable <= 0.0d) {
+                        break;
+                    }
+
+                    int maxReducibleQty = currentQty - 1;
+                    if (maxReducibleQty <= 0) {
+                        break;
+                    }
+
+                    double maxReducibleUtility = maxReducibleQty * ptable;
+                    double requiredUtility = Math.min(remainingNeed, maxReducibleUtility);
+                    int rq = (int) Math.ceil(requiredUtility / ptable);
+                    rq = Math.min(rq, maxReducibleQty);
+                    if (rq <= 0) {
+                        break;
+                    }
+
+                    int newQty = currentQty - rq;
+                    double oldUtility = currentQty * ptable;
+                    double newUtility = newQty * ptable;
+                    double difference = oldUtility - newUtility;
+                    bestTx.setInternalUtility(bestItem, newQty);
+                    bestTx.deductTransactionUtility(difference, eu);
+                    changed = true;
+
+                    Set<Transaction> updatedSupports = findSupportingTransactionsByCombinations(db, leafCombinations);
+                    if (updatedSupports.isEmpty()) {
+                        break;
+                    }
+                    utility = computeSensitiveUtilityByDescendants(updatedSupports, descendants, eu);
+                }
+
+                return changed;
+            }
 }

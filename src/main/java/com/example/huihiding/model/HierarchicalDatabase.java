@@ -16,6 +16,7 @@ import java.util.stream.Collectors;
 public class HierarchicalDatabase {
     private final Set<Transaction> transactions = new LinkedHashSet<>();
     private final Map<String, Double> externalUtilities = new HashMap<>();
+    private final Map<Integer, Integer> taxonomyParentByChild = new HashMap<>();
     private Taxonomy taxonomy = new Taxonomy();
     private double minUtilityThreshold;
 
@@ -25,6 +26,10 @@ public class HierarchicalDatabase {
 
     public Map<String, Double> getExternalUtilities() {
         return Collections.unmodifiableMap(externalUtilities);
+    }
+
+    public Map<Integer, Integer> getTaxonomyParentByChild() {
+        return Collections.unmodifiableMap(taxonomyParentByChild);
     }
 
     public Taxonomy getTaxonomy() {
@@ -51,6 +56,10 @@ public class HierarchicalDatabase {
         externalUtilities.put(item, eu);
     }
 
+    public void putTaxonomyEdge(int child, int parent) {
+        taxonomyParentByChild.put(child, parent);
+    }
+
     public double getUtility(Set<String> itemset) {
         double utility = 0.0d;
         for (Transaction t : transactions) {
@@ -65,6 +74,16 @@ public class HierarchicalDatabase {
         return itemset.stream()
                 .mapToDouble(item -> transaction.getUtility(item, externalUtilities))
                 .sum();
+    }
+
+    public double getUtilityByItemIds(Set<Integer> itemset) {
+        double utility = 0.0d;
+        for (Transaction t : transactions) {
+            if (t.getItemToUtility().keySet().containsAll(itemset)) {
+                utility += itemset.stream().mapToLong(t::getItemUtility).sum();
+            }
+        }
+        return utility;
     }
 
     /**
@@ -113,9 +132,11 @@ public class HierarchicalDatabase {
         copy.setTaxonomy(this.taxonomy);
         copy.setMinUtilityThreshold(this.minUtilityThreshold);
         this.externalUtilities.forEach(copy::setExternalUtility);
+        this.taxonomyParentByChild.forEach(copy::putTaxonomyEdge);
         for (Transaction t : this.transactions) {
             Transaction nt = new Transaction(t.getId());
             t.getItemToQuantity().forEach(nt::setInternalUtility);
+            t.getItemToUtility().forEach(nt::setItemUtility);
             copy.addTransaction(nt);
         }
         return copy;

@@ -133,6 +133,10 @@ public class DesktopApp extends JFrame {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("Chon file dataset (input.txt)");
         chooser.setFileFilter(new FileNameExtensionFilter("Text files", "txt"));
+        Path defaultDataDir = Path.of("data").toAbsolutePath().normalize();
+        if (Files.isDirectory(defaultDataDir)) {
+            chooser.setCurrentDirectory(defaultDataDir.toFile());
+        }
 
         int result = chooser.showOpenDialog(this);
         if (result != JFileChooser.APPROVE_OPTION) {
