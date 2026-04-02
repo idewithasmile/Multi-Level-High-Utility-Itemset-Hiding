@@ -77,7 +77,7 @@ public class FMLHProtector extends MLHProtector {
                     break;
                 }
 
-                List<String> orderedLeaves = sortLeavesByUtilityDesc(new ArrayList<>(descendantUnion), supports, eu);
+                List<String> orderedLeaves = sortLeavesByUtilityAsc(new ArrayList<>(descendantUnion), supports, eu);
                 boolean progressed = false;
 
                 for (String item : orderedLeaves) {
@@ -183,7 +183,7 @@ public class FMLHProtector extends MLHProtector {
         }
 
         List<Transaction> orderedSupports = supports.stream()
-                .sorted(Comparator.comparingDouble((Transaction t) -> t.getUtility(item, eu)).reversed())
+            .sorted(Comparator.comparingDouble((Transaction t) -> t.getUtility(item, eu)))
                 .toList();
 
         for (Transaction tx : orderedSupports) {
@@ -259,9 +259,9 @@ public class FMLHProtector extends MLHProtector {
         return sensitive.getItems().stream().sorted().toList();
     }
 
-    private List<String> sortLeavesByUtilityDesc(List<String> leaves,
-                                                 Set<Transaction> supports,
-                                                 Map<String, Double> eu) {
+    private List<String> sortLeavesByUtilityAsc(List<String> leaves,
+                                                Set<Transaction> supports,
+                                                Map<String, Double> eu) {
         Map<String, Double> utilityByLeaf = new HashMap<>();
         for (String leaf : leaves) {
             double sum = supports.stream().mapToDouble(t -> t.getUtility(leaf, eu)).sum();
@@ -271,7 +271,6 @@ public class FMLHProtector extends MLHProtector {
         return leaves.stream()
                 .sorted(Comparator
                         .comparingDouble((String item) -> utilityByLeaf.getOrDefault(item, 0.0d))
-                        .reversed()
                         .thenComparing(Comparator.naturalOrder()))
                 .toList();
     }
@@ -307,12 +306,12 @@ public class FMLHProtector extends MLHProtector {
 
                     final double remainingNeed = utility - strictThreshold;
 
-                    String bestItem = descendants.stream()
-                            .max(Comparator
-                            .comparingDouble((String item) -> supportsSnapshot.stream()
-                                            .mapToDouble(t -> t.getUtility(item, eu))
-                                            .sum())
-                                    .thenComparing(Comparator.naturalOrder()))
+                        String bestItem = descendants.stream()
+                            .min(Comparator
+                                .comparingDouble((String item) -> supportsSnapshot.stream()
+                                    .mapToDouble(t -> t.getUtility(item, eu))
+                                    .sum())
+                                .thenComparing(Comparator.naturalOrder()))
                             .orElse(null);
 
                     if (bestItem == null) {
@@ -321,7 +320,7 @@ public class FMLHProtector extends MLHProtector {
 
                         Transaction bestTx = supportsSnapshot.stream()
                             .filter(t -> t.getInternalUtility(bestItem) > 1)
-                            .max(Comparator.comparingDouble(t -> t.getUtility(bestItem, eu)))
+                            .min(Comparator.comparingDouble(t -> t.getUtility(bestItem, eu)))
                             .orElse(null);
 
                     if (bestTx == null) {
