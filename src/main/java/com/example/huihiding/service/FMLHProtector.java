@@ -129,7 +129,28 @@ public class FMLHProtector extends MLHProtector {
                 }
             }
         }
+
+        int modifiedCount = countModifiedTransactions(super.original, working);
+        System.out.println("[FMLH] Modified " + modifiedCount + " transactions");
         return working;
+    }
+
+    private int countModifiedTransactions(HierarchicalDatabase before,
+                                          HierarchicalDatabase after) {
+        Map<Integer, Transaction> beforeById = before.getTransactions().stream()
+                .collect(Collectors.toMap(Transaction::getId, t -> t));
+
+        int modified = 0;
+        for (Transaction txAfter : after.getTransactions()) {
+            Transaction txBefore = beforeById.get(txAfter.getId());
+            if (txBefore == null) {
+                continue;
+            }
+            if (!txBefore.getItemToQuantity().equals(txAfter.getItemToQuantity())) {
+                modified++;
+            }
+        }
+        return modified;
     }
 
     @Override

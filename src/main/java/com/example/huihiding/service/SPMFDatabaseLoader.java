@@ -8,7 +8,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Loader for SPMF MLHUIM input files.
@@ -26,6 +28,10 @@ public class SPMFDatabaseLoader {
                                      int threshold) throws IOException {
         HierarchicalDatabase db = new HierarchicalDatabase();
         db.setMinUtilityThreshold(threshold);
+
+        // Overflow-safe TWU audit map (long accumulation).
+        // This loader does NOT prune by TWU; map is used for strict debugging/verification only.
+        Map<Integer, Long> twuMap = new HashMap<>();
 
         Taxonomy taxonomy = loadTaxonomy(taxonomyPath);
         db.setTaxonomy(taxonomy);
@@ -46,6 +52,13 @@ public class SPMFDatabaseLoader {
                 throw new IOException("Invalid SPMF transaction line: " + line);
             }
 
+            long transactionUtility;
+            try {
+                transactionUtility = Math.round(Double.parseDouble(parts[1].trim()));
+            } catch (NumberFormatException e) {
+                throw new IOException("Invalid transaction utility (TU) in line: " + line, e);
+            }
+
             String[] items = parts[0].trim().split("\\s+");
             String[] utils = parts[2].trim().split("\\s+");
             if (items.length != utils.length) {
@@ -57,6 +70,13 @@ public class SPMFDatabaseLoader {
                 String item = items[i].trim();
                 if (item.isBlank()) {
                     continue;
+                }
+
+                try {
+                    int itemId = Integer.parseInt(item);
+                    twuMap.merge(itemId, transactionUtility, Long::sum);
+                } catch (NumberFormatException ignored) {
+                    // Non-numeric item id: skip TWU audit map entry.
                 }
 
                 int utility;
@@ -79,6 +99,12 @@ public class SPMFDatabaseLoader {
                 db.addTransaction(tx);
             }
         }
+
+        // CRITICAL TWU debug for suspected dropped items.
+        long twu9806 = twuMap.getOrDefault(9806, 0L);
+        long twu10805 = twuMap.getOrDefault(10805, 0L);
+        System.out.println("DB LOADER DEBUG: Item 9806 has TWU = " + twu9806 + " | Threshold = " + threshold);
+        System.out.println("DB LOADER DEBUG: Item 10805 has TWU = " + twu10805 + " | Threshold = " + threshold);
 
         return db;
     }

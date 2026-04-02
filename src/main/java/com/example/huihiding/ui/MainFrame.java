@@ -6,6 +6,7 @@ import com.example.huihiding.model.Taxonomy;
 import com.example.huihiding.model.Transaction;
 import com.example.huihiding.service.EndToEndEvaluatorService;
 import com.example.huihiding.service.EvaluationReport;
+import com.example.huihiding.service.SPMFDataExporter;
 
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
@@ -35,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
@@ -59,6 +61,7 @@ public class MainFrame extends JFrame {
     private final JButton loadButton = new JButton("Load Database");
     private final JButton runButton = new JButton("Run Protection & Evaluate");
     private final JTextField thresholdField = new JTextField("88", 6);
+    private final JTextField sensitiveField = new JTextField("", 24);
     private final JLabel statusLabel = new JLabel("Ready");
     private final JLabel loadedFileLabel = new JLabel("No input loaded");
 
@@ -97,6 +100,8 @@ public class MainFrame extends JFrame {
         top.add(loadButton);
         top.add(new JLabel("Threshold:"));
         top.add(thresholdField);
+        top.add(new JLabel("Sensitive Itemsets:"));
+        top.add(sensitiveField);
         top.add(runButton);
         top.add(new JLabel("|"));
         top.add(statusLabel);
@@ -222,10 +227,6 @@ public class MainFrame extends JFrame {
                     throw new IllegalArgumentException(
                             "File khong dung dinh dang input noi bo (thieu [TRANSACTIONS]) hoac khong co giao dich.");
                 }
-                if (parsed.sensitiveItemsets() == null || parsed.sensitiveItemsets().isEmpty()) {
-                    throw new IllegalArgumentException(
-                            "File thieu [SENSITIVE_ITEMSETS]. Vui long dung file input.txt dung format de danh gia PPUM.");
-                }
 
                 internalInputMode = true;
                 runButton.setEnabled(true);
@@ -235,7 +236,11 @@ public class MainFrame extends JFrame {
                 originalHuisArea.setText("(Will be filled after SPMF baseline run)");
                 sanitizedTransactionsArea.setText("");
                 sanitizedHuisArea.setText("");
-                statusLabel.setText("Loaded internal input format. Ready to run.");
+                if (parsed.sensitiveItemsets() == null || parsed.sensitiveItemsets().isEmpty()) {
+                    statusLabel.setText("Loaded internal input. Sensitive itemsets rong -> se auto-chon tu baseline.");
+                } else {
+                    statusLabel.setText("Loaded internal input format. Ready to run.");
+                }
                 resetMetricLabels();
                 return;
             } catch (Exception ignoredInternalFormatError) {
@@ -298,6 +303,7 @@ public class MainFrame extends JFrame {
         }
 
         Path workDir = Path.of("target", "e2e-ui").toAbsolutePath();
+        String sensitiveSpec = sensitiveField.getText() == null ? "" : sensitiveField.getText().trim();
 
         EndToEndEvaluatorService.ParsedInput runInput;
         if (internalInputMode) {
@@ -310,19 +316,21 @@ public class MainFrame extends JFrame {
                         javax.swing.JOptionPane.ERROR_MESSAGE);
                 return;
             }
+
+                if (!sensitiveSpec.isBlank()) {
+                    List<Itemset> manualSensitive = parseSensitiveSpec(sensitiveSpec);
+                    if (manualSensitive.isEmpty()) {
+                        javax.swing.JOptionPane.showMessageDialog(this,
+                                "Sensitive Itemsets khong hop le. Vi du: 1 2; 2 4 5",
+                                "Invalid Sensitive Itemsets",
+                                javax.swing.JOptionPane.WARNING_MESSAGE);
+                        return;
+                    }
+                    runInput = new EndToEndEvaluatorService.ParsedInput(runInput.db(), manualSensitive);
+                }
         } else {
-            String sensitiveSpec = javax.swing.JOptionPane.showInputDialog(
-                    this,
-                    "Nhap Sensitive Itemsets cho file SPMF raw (phan cach boi ';').\n"
-                            + "Vi du: 1 2; 2 4 5; 3 5",
-                    "1 2; 2 4 5"
-            );
-            if (sensitiveSpec == null) {
-                statusLabel.setText("Run cancelled.");
-                return;
-            }
             try {
-                runInput = buildParsedInputFromRawSpmf(loadedInputFile, thresholdOverride, sensitiveSpec);
+                runInput = buildParsedInputFromRawSpmf(loadedInputFile, thresholdOverride, sensitiveSpec, spmfJar, workDir);
             } catch (Exception ex) {
                 javax.swing.JOptionPane.showMessageDialog(this,
                         "Khong the chuan hoa SPMF raw de chay pipeline:\n" + ex.getMessage(),
@@ -332,11 +340,61 @@ public class MainFrame extends JFrame {
             }
         }
 
+        // Ensure threshold from UI is always propagated into the working database
+        // before any baseline/sanitization steps.
+        runInput.db().setMinUtilityThreshold(thresholdOverride);
+
+        try {
+            Files.createDirectories(workDir);
+            Files.deleteIfExists(Path.of("target/e2e-ui/spmf_original_output.txt"));
+            Files.deleteIfExists(Path.of("target/e2e-ui/spmf_sanitized_output.txt"));
+        } catch (Exception ex) {
+            javax.swing.JOptionPane.showMessageDialog(this,
+                    "Khong the clear output cache:\n" + ex.getMessage(),
+                    "Cache Clear Error",
+                    javax.swing.JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        if (runInput.sensitiveItemsets() == null || runInput.sensitiveItemsets().isEmpty()) {
+            try {
+            Itemset winningItemset = findHighestUtilityItemsetFromPrimaryBaseline(
+                        runInput.db(),
+                        thresholdOverride,
+                        spmfJar,
+                        workDir
+                );
+
+            if (winningItemset == null || winningItemset.getItems().isEmpty()) {
+                javax.swing.JOptionPane.showMessageDialog(this,
+                    "Khong tim thay baseline HUI de auto-chon sensitive.\n"
+                        + "Hay giam threshold hoac nhap sensitive itemsets thu cong.",
+                    "Auto Sensitive Failed",
+                    javax.swing.JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            sensitiveField.setText(winningItemset.getLabel());
+            runInput = new EndToEndEvaluatorService.ParsedInput(runInput.db(), List.of(winningItemset));
+            } catch (Exception ex) {
+                javax.swing.JOptionPane.showMessageDialog(this,
+                        "Khong the auto-chon sensitive itemsets:\n" + ex.getMessage(),
+                        "Auto Sensitive Error",
+                        javax.swing.JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+        }
+
         runButton.setEnabled(false);
         loadButton.setEnabled(false);
         statusLabel.setText("Processing... Calling SPMF...");
 
-        EndToEndEvaluatorService.ParsedInput finalRunInput = runInput;
+        // Safe execution: isolate run state from mutable UI/session state.
+        // Also enforce threshold on deep copy in case deepCopy() does not preserve it.
+        HierarchicalDatabase dbCopy = runInput.db().deepCopy();
+        dbCopy.setMinUtilityThreshold(runInput.db().getMinUtilityThreshold());
+        EndToEndEvaluatorService.ParsedInput finalRunInput =
+            new EndToEndEvaluatorService.ParsedInput(dbCopy, runInput.sensitiveItemsets());
         SwingWorker<EvaluationReport, Void> worker = new SwingWorker<>() {
             @Override
             protected EvaluationReport doInBackground() {
@@ -433,7 +491,9 @@ public class MainFrame extends JFrame {
 
     private EndToEndEvaluatorService.ParsedInput buildParsedInputFromRawSpmf(Path file,
                                                                               double threshold,
-                                                                              String sensitiveSpec) throws Exception {
+                                                                              String sensitiveSpec,
+                                                                              Path spmfJar,
+                                                                              Path workDir) throws Exception {
         List<String> lines = Files.readAllLines(file);
         HierarchicalDatabase db = new HierarchicalDatabase();
         db.setMinUtilityThreshold(threshold);
@@ -498,11 +558,107 @@ public class MainFrame extends JFrame {
         db.setTaxonomy(taxonomy);
 
         List<Itemset> sensitiveItemsets = parseSensitiveSpec(sensitiveSpec);
-        if (sensitiveItemsets.isEmpty()) {
-            throw new IllegalArgumentException("Danh sach sensitive itemsets rong.");
-        }
 
         return new EndToEndEvaluatorService.ParsedInput(db, sensitiveItemsets);
+    }
+
+    private Itemset findHighestUtilityItemsetFromPrimaryBaseline(HierarchicalDatabase db,
+                                                                  double threshold,
+                                                                  Path spmfJar,
+                                                                  Path workDir) throws Exception {
+        SPMFDataExporter exporter = new SPMFDataExporter();
+        Path originalDb = workDir.resolve("spmf_original_db.txt");
+        Path taxonomy = workDir.resolve("spmf_taxonomy.txt");
+        Path originalOut = workDir.resolve("spmf_original_output.txt");
+
+        exporter.exportDatabase(db, originalDb);
+        exporter.exportTaxonomy(db.getTaxonomy(), taxonomy);
+        Files.deleteIfExists(originalOut);
+
+        evaluatorService.runSpmfMlhuiminer(
+                spmfJar,
+                originalDb,
+                originalOut,
+                threshold,
+                taxonomy,
+                java.time.Duration.ofMinutes(10)
+        );
+
+        String bestItemsetRaw = findHighestUtilityItemsetStringFromOutput(originalOut);
+        if (bestItemsetRaw == null || bestItemsetRaw.isBlank()) {
+            return null;
+        }
+
+        Map<Integer, String> idToItem = exporter.getIdToItemMap();
+        Set<String> mappedItems = new LinkedHashSet<>();
+        for (String token : bestItemsetRaw.split("\\s+")) {
+            String t = token == null ? "" : token.trim();
+            if (t.isBlank()) {
+                continue;
+            }
+
+            try {
+                int id = Integer.parseInt(t);
+                String originalItem = idToItem.get(id);
+                if (originalItem != null && !originalItem.isBlank()) {
+                    mappedItems.add(originalItem);
+                }
+            } catch (NumberFormatException ex) {
+                mappedItems.add(t);
+            }
+        }
+
+        if (mappedItems.isEmpty()) {
+            return null;
+        }
+
+        String label = String.join(" ", mappedItems);
+        return new Itemset(mappedItems, label);
+    }
+
+    private String findHighestUtilityItemsetStringFromOutput(Path outputFile) throws Exception {
+        List<String> lines = Files.readAllLines(outputFile);
+        double bestUtil = Double.NEGATIVE_INFINITY;
+        String bestItemsetRaw = null;
+
+        for (String raw : lines) {
+            if (raw == null) {
+                continue;
+            }
+            String line = raw.trim();
+            if (line.isBlank()) {
+                continue;
+            }
+
+            int marker = line.indexOf("#UTIL:");
+            if (marker < 0) {
+                continue;
+            }
+
+            String itemsetPart = line.substring(0, marker).trim();
+            String utilPart = line.substring(marker + "#UTIL:".length()).trim();
+            if (itemsetPart.isBlank() || utilPart.isBlank()) {
+                continue;
+            }
+
+            double util;
+            try {
+                util = Double.parseDouble(utilPart.split("\\s+")[0]);
+            } catch (NumberFormatException ex) {
+                continue;
+            }
+
+            if (util > bestUtil) {
+                bestUtil = util;
+                bestItemsetRaw = itemsetPart;
+            }
+        }
+
+        if (bestItemsetRaw == null) {
+            return "";
+        }
+
+        return bestItemsetRaw;
     }
 
     private List<Itemset> parseSensitiveSpec(String spec) {
@@ -510,19 +666,25 @@ public class MainFrame extends JFrame {
         if (spec == null || spec.isBlank()) {
             return out;
         }
-        String[] groups = spec.split(";");
+
+        // Support multiple sensitive itemsets separated by ';' or newline.
+        // Inside each itemset, items are separated by spaces and/or commas.
+        String[] groups = spec.split("[;\\r\\n]+");
         for (String g : groups) {
             String trimmed = g.trim();
             if (trimmed.isBlank()) {
                 continue;
             }
+
             String[] tokens = trimmed.split("[\\s,]+");
             Set<String> items = new LinkedHashSet<>();
             for (String t : tokens) {
-                if (!t.isBlank()) {
-                    items.add(t.trim());
+                String token = t == null ? "" : t.trim();
+                if (!token.isBlank()) {
+                    items.add(token);
                 }
             }
+
             if (!items.isEmpty()) {
                 String label = String.join(" ", items);
                 out.add(new Itemset(items, label));

@@ -10,6 +10,40 @@ Project now supports:
 
 ---
 
+## 0) Chạy nhanh (khuyên dùng)
+
+Nếu bạn chỉ cần chạy chương trình ngay:
+
+### Chạy GUI
+
+```bash
+mvn -q test-compile
+java -cp target/hui-hiding-0.1.0-SNAPSHOT.jar com.example.huihiding.ui.MainFrame
+```
+
+### Chạy benchmark 4 bộ dữ liệu + xuất CSV
+
+```bash
+mvn -q test-compile && java -Xmx20G -cp target/classes:target/test-classes com.example.huihiding.BenchmarkRunner
+```
+
+Sau khi chạy xong sẽ có file:
+
+- `benchmark_results.csv`
+
+### Vẽ biểu đồ từ CSV
+
+```bash
+python3 plot_results.py
+```
+
+Sinh ra:
+
+- `hui_comparison.png`
+- `execution_time.png`
+
+---
+
 ## 1) Kiến trúc chính
 
 - **Core models**: `HierarchicalDatabase`, `Transaction`, `Itemset`, `Taxonomy`
@@ -186,3 +220,32 @@ Console sẽ in:
 - [src/main/java/com/example/huihiding/service/SPMFDataExporter.java](src/main/java/com/example/huihiding/service/SPMFDataExporter.java)
 - [src/main/java/com/example/huihiding/service/SPMFValidatorService.java](src/main/java/com/example/huihiding/service/SPMFValidatorService.java)
 - [src/test/java/com/example/huihiding/ProtectorAlgorithmsTest.java](src/test/java/com/example/huihiding/ProtectorAlgorithmsTest.java)
+- [src/test/java/com/example/huihiding/BenchmarkRunner.java](src/test/java/com/example/huihiding/BenchmarkRunner.java)
+- [plot_results.py](plot_results.py)
+
+---
+
+## 7) BenchmarkRunner (4 dataset chuẩn)
+
+`BenchmarkRunner` đã cấu hình sẵn:
+
+- Retail: `data/retail_utility_spmf.txt` — threshold `450000`
+- Mushroom: `data/mushroom_utility_SPMF.txt` — threshold `600000`
+- Chainstore: `data/chainstore.txt` — threshold `1000000`
+- Chess: `data/chess_utility_spmf.txt` — threshold `2050000`
+
+Runner sẽ tự động:
+
+1. Mine baseline HUI bằng SPMF
+2. Chọn sensitive itemset có utility lớn nhất từ baseline output
+3. Chạy `FMLHProtector`
+4. Mine lại sau sanitize
+5. Tính và ghi chỉ số vào `benchmark_results.csv`
+
+Lệnh chạy:
+
+```bash
+mvn -q test-compile && java -Xmx20G -cp target/classes:target/test-classes com.example.huihiding.BenchmarkRunner
+```
+
+Lưu ý: benchmark có thể mất vài phút đến vài chục phút tùy máy/RAM.

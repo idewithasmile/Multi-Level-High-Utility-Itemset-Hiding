@@ -35,6 +35,10 @@ public class SPMFDataExporter {
         return Map.copyOf(idToItem);
     }
 
+    public String getOriginalId(int spmfId) {
+        return idToItem.get(spmfId);
+    }
+
     public int getOrCreateId(String item) {
         Integer id = itemToId.get(item);
         if (id != null) {

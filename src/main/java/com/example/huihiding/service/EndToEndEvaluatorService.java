@@ -107,11 +107,14 @@ public class EndToEndEvaluatorService {
 
             // 3) Mine original
             Path spmfOriginalOutput = workDir.resolve("spmf_original_output.txt");
+            Files.deleteIfExists(spmfOriginalOutput);
             runSpmfMlhuiminer(spmfJar, spmfOriginalDb, spmfOriginalOutput, threshold, spmfTaxonomy, Duration.ofMinutes(5));
-            Set<String> originalHUIs = parseSPMFOutput(spmfOriginalOutput);
+            Set<String> originalHUIs = parseSPMFOutput(spmfOriginalOutput, exporter);
+
 
             // 4) Run in-memory sanitization with FMLHProtector
-            HierarchicalDatabase sanitizedDb = new FMLHProtector(originalDb.deepCopy(), sensitiveItemsets).sanitize();
+            // Sử dụng trực tiếp originalDb để giữ nguyên toàn bộ trạng thái TWU
+            HierarchicalDatabase sanitizedDb = new FMLHProtector(originalDb, sensitiveItemsets).sanitize();
 
             // 5) Export sanitized DB using SAME exporter instance to keep mapping IDs consistent
             Path spmfSanitizedDb = workDir.resolve("spmf_sanitized_db.txt");
@@ -120,10 +123,12 @@ public class EndToEndEvaluatorService {
             // 6) Mine sanitized
             Path spmfSanitizedOutput = workDir.resolve("spmf_sanitized_output.txt");
             runSpmfMlhuiminer(spmfJar, spmfSanitizedDb, spmfSanitizedOutput, threshold, spmfTaxonomy, Duration.ofMinutes(5));
-            Set<String> sanitizedHUIs = parseSPMFOutput(spmfSanitizedOutput);
+            Set<String> sanitizedHUIs = parseSPMFOutput(spmfSanitizedOutput, exporter);
 
-            // 7) Translate sensitive itemsets into mapped IDs and evaluate
-            Set<String> sensitiveHUIs = exporter.mapSensitiveItemsetsToIds(sensitiveItemsets);
+            // 7) Build sensitive set robustly: support both
+            //    (a) user-provided SPMF IDs directly and
+            //    (b) internal-item names requiring exporter mapping to IDs.
+            Set<String> sensitiveHUIs = resolveSensitiveHUIs(originalHUIs, sensitiveItemsets, exporter);
             EvaluationMetrics metrics = evaluateMetrics(originalHUIs, sanitizedHUIs, sensitiveHUIs);
             long runtimeMs = (System.nanoTime() - startNs) / 1_000_000L;
 
@@ -204,6 +209,43 @@ public class EndToEndEvaluatorService {
         );
     }
 
+    private Set<String> resolveSensitiveHUIs(Set<String> originalHUIs,
+                                             List<Itemset> sensitiveItemsets,
+                                             SPMFDataExporter exporter) {
+        Set<String> originalCanonical = canonicalizeSet(originalHUIs);
+
+        Set<String> direct = new LinkedHashSet<>();
+        if (sensitiveItemsets != null) {
+            for (Itemset itemset : sensitiveItemsets) {
+                if (itemset == null || itemset.getItems() == null || itemset.getItems().isEmpty()) {
+                    continue;
+                }
+                direct.add(String.join(" ", itemset.getItems()).trim().replaceAll("\\s+", " "));
+            }
+        }
+
+        Set<String> mapped = exporter.mapSensitiveItemsetsToIds(sensitiveItemsets);
+
+        Set<String> directCanonical = canonicalizeSet(direct);
+        Set<String> mappedCanonical = canonicalizeSet(mapped);
+
+        int directOverlap = 0;
+        for (String s : directCanonical) {
+            if (originalCanonical.contains(s)) {
+                directOverlap++;
+            }
+        }
+
+        int mappedOverlap = 0;
+        for (String s : mappedCanonical) {
+            if (originalCanonical.contains(s)) {
+                mappedOverlap++;
+            }
+        }
+
+        return mappedOverlap >= directOverlap ? mapped : direct;
+    }
+
     /**
      * Parses SPMF output file. Each result line format is usually:
      * item1 item2 ... #UTIL: utility_value
@@ -213,6 +255,10 @@ public class EndToEndEvaluatorService {
     }
 
     public Set<String> parseSPMFOutput(Path filePath) throws IOException {
+        return parseSPMFOutput(filePath, null);
+    }
+
+    public Set<String> parseSPMFOutput(Path filePath, SPMFDataExporter exporter) throws IOException {
         Set<String> result = new LinkedHashSet<>();
         List<String> lines = Files.readAllLines(filePath, StandardCharsets.UTF_8);
 
@@ -229,6 +275,28 @@ public class EndToEndEvaluatorService {
             String itemPart = markerIndex >= 0 ? line.substring(0, markerIndex).trim() : line;
             if (itemPart.isBlank()) {
                 continue;
+            }
+
+            if (exporter != null) {
+                List<String> restoredItems = new ArrayList<>();
+                for (String token : itemPart.split("\\s+")) {
+                    String t = token == null ? "" : token.trim();
+                    if (t.isBlank()) {
+                        continue;
+                    }
+
+                    try {
+                        int spmfId = Integer.parseInt(t);
+                        String original = exporter.getOriginalId(spmfId);
+                        restoredItems.add((original == null || original.isBlank()) ? t : original.trim());
+                    } catch (NumberFormatException ex) {
+                        restoredItems.add(t);
+                    }
+                }
+                itemPart = String.join(" ", restoredItems).trim();
+                if (itemPart.isBlank()) {
+                    continue;
+                }
             }
 
             result.add(canonicalizeItemset(itemPart));
@@ -251,6 +319,8 @@ public class EndToEndEvaluatorService {
         Objects.requireNonNull(outputResultFile, "outputResultFile");
         Objects.requireNonNull(taxonomyFile, "taxonomyFile");
 
+        Files.deleteIfExists(outputResultFile);
+
         Path outDir = outputResultFile.getParent();
         if (outDir != null) {
             Files.createDirectories(outDir);
@@ -259,6 +329,7 @@ public class EndToEndEvaluatorService {
         String javaBin = Path.of(System.getProperty("java.home"), "bin", "java").toString();
         List<String> cmd = List.of(
                 javaBin,
+            "-Xmx12G",
                 "-jar",
                 spmfJar.toAbsolutePath().toString(),
                 "run",
@@ -297,7 +368,11 @@ public class EndToEndEvaluatorService {
 
         int exit = process.exitValue();
         if (exit != 0) {
-            throw new IOException("SPMF failed with exit code " + exit + ".\nOutput:\n" + processOutput);
+            throw new RuntimeException("Baseline SPMF Process Crashed! exit=" + exit + "\nOutput:\n" + processOutput);
+        }
+
+        if (!Files.exists(outputResultFile)) {
+            throw new RuntimeException("SPMF output file was not generated: " + outputResultFile.toAbsolutePath());
         }
     }
 

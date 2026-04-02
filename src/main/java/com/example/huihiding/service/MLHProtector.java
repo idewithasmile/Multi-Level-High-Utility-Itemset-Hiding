@@ -266,12 +266,65 @@ public class MLHProtector {
 
     private boolean supportsAnyCombination(Transaction tx, List<Set<String>> leafCombinations) {
         for (Set<String> combo : leafCombinations) {
-            boolean containsAll = combo.stream().allMatch(item -> tx.getInternalUtility(item) > 0);
+            Set<Integer> targetItems = toIntegerItemSet(combo);
+            Set<Integer> txKeys = extractTransactionIntegerKeys(tx);
+            boolean containsAll = !targetItems.isEmpty() && txKeys.containsAll(targetItems);
             if (containsAll) {
                 return true;
             }
         }
         return false;
+    }
+
+    private Set<Integer> toIntegerItemSet(Set<String> sensitiveItems) {
+        Set<Integer> out = new HashSet<>();
+        if (sensitiveItems == null) {
+            return out;
+        }
+
+        for (Object s : sensitiveItems) {
+            if (s == null) {
+                continue;
+            }
+            Integer parsed = parseIntegerToken(String.valueOf(s));
+            if (parsed != null) {
+                out.add(parsed);
+            }
+        }
+        return out;
+    }
+
+    private Set<Integer> extractTransactionIntegerKeys(Transaction transaction) {
+        Set<Integer> txKeys = new HashSet<>();
+        for (Object key : transaction.getItemToQuantity().keySet()) {
+            if (key == null) {
+                continue;
+            }
+            Integer parsed = parseIntegerToken(String.valueOf(key));
+            if (parsed != null) {
+                txKeys.add(parsed);
+            }
+        }
+        return txKeys;
+    }
+
+    private Integer parseIntegerToken(String token) {
+        String clean = token == null ? "" : token.trim();
+        if (clean.isBlank()) {
+            return null;
+        }
+
+        int colon = clean.indexOf(':');
+        String numberPart = colon >= 0 ? clean.substring(0, colon).trim() : clean;
+        if (numberPart.isBlank()) {
+            return null;
+        }
+
+        try {
+            return Integer.parseInt(numberPart);
+        } catch (NumberFormatException ex) {
+            return null;
+        }
     }
 
     protected double computeSensitiveUtilityByDescendants(Set<Transaction> supports,
@@ -288,7 +341,8 @@ public class MLHProtector {
         protected Set<Transaction> findSupportingTransactions(HierarchicalDatabase db, Map<String, Set<String>> groups) {
         return db.getTransactions().stream()
                 .filter(t -> groups.values().stream().allMatch(group ->
-                        group.stream().anyMatch(i -> t.getInternalUtility(i) > 0)))
+                    !toIntegerItemSet(group).isEmpty() &&
+                        extractTransactionIntegerKeys(t).containsAll(toIntegerItemSet(group))))
             .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 

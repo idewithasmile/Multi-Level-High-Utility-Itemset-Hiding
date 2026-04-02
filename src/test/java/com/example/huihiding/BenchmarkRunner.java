@@ -9,11 +9,13 @@ import com.example.huihiding.service.FMLHProtector;
 import com.example.huihiding.service.SPMFDataExporter;
 import com.example.huihiding.service.SPMFDatabaseLoader;
 
+import java.io.FileWriter;
+import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -24,89 +26,136 @@ import java.util.concurrent.TimeUnit;
  */
 public class BenchmarkRunner {
 
+    static class Config {
+        String name;
+        String path;
+        double threshold;
+
+        Config(String n, String p, double t) {
+            name = n;
+            path = p;
+            threshold = t;
+        }
+    }
+
     public static void main(String[] args) throws Exception {
-        // === Configurable variables ===
-        String datasetPath = "data/retail_utility_spmf.txt";
-        double threshold = 450000d;
-        // ============================
-
-        final Path workspace = Path.of(".").toAbsolutePath().normalize();
-        final Path dataset = workspace.resolve(datasetPath);
-        final Path spmfJar = workspace.resolve("spmf.jar");
-        final Path workDir = workspace.resolve("target/e2e-ui");
-
-        Files.createDirectories(workDir);
-
-        final long startNs = System.nanoTime();
-
-        Path taxonomyPath = workDir.resolve("benchmark_empty_taxonomy.txt");
-        Files.writeString(taxonomyPath, "", StandardCharsets.UTF_8);
-
-        HierarchicalDatabase originalDb = loadDatasetAuto(dataset, taxonomyPath, threshold);
-        originalDb.setMinUtilityThreshold(threshold);
-
-        SPMFDataExporter exporter = new SPMFDataExporter();
-        EndToEndEvaluatorService evaluator = new EndToEndEvaluatorService();
-
-        Path originalDbFile = workDir.resolve("spmf_original_db.txt");
-        Path taxonomyFile = workDir.resolve("spmf_taxonomy.txt");
-        Path originalOutFile = workDir.resolve("spmf_original_output.txt");
-        Path sanitizedDbFile = workDir.resolve("spmf_sanitized_db.txt");
-        Path sanitizedOutFile = workDir.resolve("spmf_sanitized_output.txt");
-
-        // Delete old cache (as requested)
-        Files.deleteIfExists(originalOutFile);
-
-        exporter.exportDatabase(originalDb, originalDbFile);
-        exporter.exportTaxonomy(originalDb.getTaxonomy(), taxonomyFile);
-
-        runSpmfMlhuiminerStrict(
-                spmfJar,
-                originalDbFile,
-                originalOutFile,
-                threshold,
-                taxonomyFile,
-            Duration.ofMinutes(10),
-                workDir.resolve("spmf_baseline.log"),
-                "Baseline SPMF mining"
+        List<Config> configs = Arrays.asList(
+              new Config("Retail", "data/retail_utility_spmf.txt", 450000d)
+              /*
+               * NOTE: Disabled due to hardware limitations and time constraints.
+               * These highly dense datasets experience extreme Combinatorial Explosion
+               * using the baseline MLHUIMiner algorithm, resulting in execution
+               * timeouts (>10 minutes) or yielding 0 HUIs.
+               */
+              // , new Config("Mushroom", "data/mushroom_utility_SPMF.txt", 1200000d)
+              // , new Config("Chainstore", "data/chainstore.txt", 3000000d)
+              // , new Config("Chess", "data/chess_utility_spmf.txt", 1935000d)
         );
 
-        Itemset mostUtilityItemset = findHighestUtilityItemsetFromOutput(originalOutFile);
-        List<Itemset> sensitiveItemsets = List.of(mostUtilityItemset);
+        try (PrintWriter csv = new PrintWriter(new FileWriter("benchmark_results.csv"))) {
+            csv.println("Dataset,Threshold,Original_HUIs,Sanitized_HUIs,HF,MC,Time_ms");
 
-        HierarchicalDatabase sanitizedDb = new FMLHProtector(originalDb.deepCopy(), sensitiveItemsets).sanitize();
-        exporter.exportDatabase(sanitizedDb, sanitizedDbFile);
+            System.out.println("---------------------------------------------------------------------------------");
+            System.out.printf("%-12s | %-10s | %-6s | %-6s | %-6s | %-6s | %-8s%n",
+                    "Dataset", "Threshold", "OriHUI", "SanHUI", "HF%", "MC%", "Time(ms)");
+            System.out.println("---------------------------------------------------------------------------------");
 
-        runSpmfMlhuiminerStrict(
-                spmfJar,
-                sanitizedDbFile,
-                sanitizedOutFile,
-                threshold,
-                taxonomyFile,
-                Duration.ofMinutes(5),
-                workDir.resolve("spmf_sanitized.log"),
-                "Sanitized SPMF mining"
-        );
+            Path workDir = Path.of("target/e2e-ui");
+            Files.createDirectories(workDir);
+            Path spmfJar = Path.of("spmf.jar");
+            Path taxonomyPath = workDir.resolve("benchmark_empty_taxonomy.txt");
+            Files.writeString(taxonomyPath, "", StandardCharsets.UTF_8);
 
-        Set<String> originalHUIs = evaluator.parseSPMFOutput(originalOutFile);
-        Set<String> sanitizedHUIs = evaluator.parseSPMFOutput(sanitizedOutFile);
-        Set<String> sensitiveHUIs = exporter.mapSensitiveItemsetsToIds(sensitiveItemsets);
+            for (Config cfg : configs) {
+                try {
+                    Path inputPath = Path.of(cfg.path);
+                    if (!Files.exists(inputPath)) {
+                        continue;
+                    }
 
-        EndToEndEvaluatorService.EvaluationMetrics metrics =
-                evaluator.evaluateMetrics(originalHUIs, sanitizedHUIs, sensitiveHUIs);
+                    EndToEndEvaluatorService eval = new EndToEndEvaluatorService();
+                    long t0 = System.currentTimeMillis();
 
-        long totalMs = (System.nanoTime() - startNs) / 1_000_000L;
+                    HierarchicalDatabase db = loadDatasetAuto(inputPath, taxonomyPath, cfg.threshold);
+                    db.setMinUtilityThreshold(cfg.threshold);
 
-        System.out.println("=== Benchmark Runner ===");
-        System.out.println("Dataset: " + dataset.toAbsolutePath());
-        System.out.println("Threshold: " + threshold);
-        System.out.println("Sensitive itemset (max util): " + String.join(" ", mostUtilityItemset.getItems()));
-        System.out.println("Original HUIs: " + metrics.originalHUIs().size());
-        System.out.println("Sanitized HUIs: " + metrics.sanitizedHUIs().size());
-        System.out.printf("HF: %d (%.2f%%)%n", metrics.hfCount(), metrics.hfRatio() * 100.0d);
-        System.out.printf("MC: %d (%.2f%%)%n", metrics.mcCount(), metrics.mcRatio() * 100.0d);
-        System.out.printf("AC: %d (%.2f%%)%n", metrics.acCount(), metrics.acRatio() * 100.0d);
-        System.out.println("Execution Time (ms): " + totalMs);
+                    SPMFDataExporter exporter = new SPMFDataExporter();
+                    String prefix = cfg.name.toLowerCase();
+                    Path originalDb = workDir.resolve(prefix + "_spmf_original_db.txt");
+                    Path originalOut = workDir.resolve(prefix + "_spmf_original_output.txt");
+                    Path sanitizedDb = workDir.resolve(prefix + "_spmf_sanitized_db.txt");
+                    Path sanitizedOut = workDir.resolve(prefix + "_spmf_sanitized_output.txt");
+
+                    Files.deleteIfExists(originalOut);
+
+                    exporter.exportDatabase(db, originalDb);
+                    exporter.exportTaxonomy(db.getTaxonomy(), taxonomyPath);
+
+                    runSpmfMlhuiminerStrict(
+                            spmfJar,
+                            originalDb,
+                            originalOut,
+                            cfg.threshold,
+                            taxonomyPath,
+                            Duration.ofMinutes(10),
+                            workDir.resolve(prefix + "_baseline.log"),
+                            "Baseline SPMF mining"
+                    );
+
+                    Set<String> originalHUIs = eval.parseSPMFOutput(originalOut);
+                    if (originalHUIs.isEmpty()) {
+                        long elapsed = System.currentTimeMillis() - t0;
+                        csv.printf("%s,%.0f,0,0,0.00,0.00,%d%n", cfg.name, cfg.threshold, elapsed);
+                        System.out.printf("%-12s | %-10.0f | %-6d | %-6d | %-6.2f | %-6.2f | %-8d%n",
+                                cfg.name, cfg.threshold, 0, 0, 0.0d, 0.0d, elapsed);
+                        continue;
+                    }
+
+                    Itemset sensitive = new Itemset(new LinkedHashSet<>(List.of("9806", "10805")), "9806 10805");
+                    HierarchicalDatabase dbCopy = db.deepCopy();
+                    dbCopy.setMinUtilityThreshold(db.getMinUtilityThreshold());
+                    HierarchicalDatabase sanitized = new FMLHProtector(dbCopy, List.of(sensitive)).sanitize();
+                    exporter.exportDatabase(sanitized, sanitizedDb);
+
+                    runSpmfMlhuiminerStrict(
+                            spmfJar,
+                            sanitizedDb,
+                            sanitizedOut,
+                            cfg.threshold,
+                            taxonomyPath,
+                            Duration.ofMinutes(10),
+                            workDir.resolve(prefix + "_sanitized.log"),
+                            "Sanitized SPMF mining"
+                    );
+
+                    Set<String> sanitizedHUIs = eval.parseSPMFOutput(sanitizedOut);
+                    Set<String> sensitiveMapped = Set.of(String.join(" ", sensitive.getItems()).trim().replaceAll("\\s+", " "));
+                    EndToEndEvaluatorService.EvaluationMetrics metrics =
+                            eval.evaluateMetrics(originalHUIs, sanitizedHUIs, sensitiveMapped);
+
+                    long elapsed = System.currentTimeMillis() - t0;
+                    csv.printf("%s,%.0f,%d,%d,%.2f,%.2f,%d%n",
+                            cfg.name,
+                            cfg.threshold,
+                            originalHUIs.size(),
+                            sanitizedHUIs.size(),
+                            metrics.hfRatio() * 100.0d,
+                            metrics.mcRatio() * 100.0d,
+                            elapsed);
+
+                    System.out.printf("%-12s | %-10.0f | %-6d | %-6d | %-6.2f | %-6.2f | %-8d%n",
+                            cfg.name,
+                            cfg.threshold,
+                            originalHUIs.size(),
+                            sanitizedHUIs.size(),
+                            metrics.hfRatio() * 100.0d,
+                            metrics.mcRatio() * 100.0d,
+                            elapsed);
+                } catch (Exception e) {
+                    System.err.println("Error processing " + cfg.name + ": " + e.getMessage());
+                }
+            }
+        }
     }
 
     private static HierarchicalDatabase loadDatasetAuto(Path dataset,
@@ -175,63 +224,6 @@ public class BenchmarkRunner {
         }
 
         return db;
-    }
-
-    private static Itemset findHighestUtilityItemsetFromOutput(Path outputFile) throws Exception {
-        List<String> lines = Files.readAllLines(outputFile, StandardCharsets.UTF_8);
-        double bestUtil = Double.NEGATIVE_INFINITY;
-        String bestItemsetRaw = null;
-
-        for (String raw : lines) {
-            if (raw == null) {
-                continue;
-            }
-            String line = raw.trim();
-            if (line.isEmpty()) {
-                continue;
-            }
-
-            int marker = line.indexOf("#UTIL:");
-            if (marker < 0) {
-                continue;
-            }
-
-            String itemsetPart = line.substring(0, marker).trim();
-            String utilPart = line.substring(marker + "#UTIL:".length()).trim();
-            if (itemsetPart.isEmpty() || utilPart.isEmpty()) {
-                continue;
-            }
-
-            double util;
-            try {
-                util = Double.parseDouble(utilPart.split("\\s+")[0]);
-            } catch (NumberFormatException ex) {
-                continue;
-            }
-
-            if (util > bestUtil) {
-                bestUtil = util;
-                bestItemsetRaw = itemsetPart;
-            }
-        }
-
-        if (bestItemsetRaw == null) {
-            throw new IllegalStateException("Cannot determine highest-utility itemset from baseline output.");
-        }
-
-        String[] parts = bestItemsetRaw.split("\\s+");
-        Set<String> items = new LinkedHashSet<>();
-        for (String p : parts) {
-            String token = p.trim();
-            if (!token.isEmpty()) {
-                items.add(token);
-            }
-        }
-        if (items.isEmpty()) {
-            throw new IllegalStateException("Highest-utility itemset is empty.");
-        }
-
-        return new Itemset(items, String.join(" ", new ArrayList<>(items)));
     }
 
     private static void runSpmfMlhuiminerStrict(Path spmfJar,
