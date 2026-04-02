@@ -226,7 +226,7 @@ mvn clean package -DskipTests
 
 - Dataset: `data/retail_utility_spmf.txt`
 - Threshold: `450000`
-- Sensitive itemset (fixed): `9806 10805`
+- Sensitive itemset (fixed): `40 49`
 
 Other dense datasets are intentionally commented in benchmark config due to runtime/hardware trade-offs.
 
